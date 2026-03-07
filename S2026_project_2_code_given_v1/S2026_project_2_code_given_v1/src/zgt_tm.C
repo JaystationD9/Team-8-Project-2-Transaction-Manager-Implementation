@@ -13,7 +13,7 @@
 #include "zgt_tm.h"
 #include "zgt_extern.h"
 
-#define TEAM_NO      88     //insert your team number here
+#define TEAM_NO      8     //insert your team number here
  
 
 // Modified to fix handling with 'end all' as last input
@@ -123,7 +123,28 @@ int zgt_tm::TxWrite(long tid, long obno, int thrNum)
   //call the write function (writetx); same as above
 
     // write your code
-    
+#ifdef TM_DEBUG
+   printf("\ncreating TxWrite thread for Tx: %ld\n", tid);
+   fflush(stdout);
+#endif
+
+   struct param *nodeinfo = (struct param*)malloc(sizeof(struct param));
+   nodeinfo->tid = tid;
+   nodeinfo->obno = obno;
+   nodeinfo->Txtype = ' ';
+   nodeinfo->count = --SEQNUM[tid];
+
+   int status;
+   status = pthread_create(&threadid[thrNum], NULL, writetx, (void*)nodeinfo);
+   if (status) {
+      printf("ERROR: return code from pthread_create() is:%d\n", status);
+      exit(-1);
+   }
+
+#ifdef TM_DEBUG
+   printf("\nexiting TxWrite thread create for Tx: %ld\n", tid);
+   fflush(stdout);
+#endif
    return(0);  // successful operation
  }
 

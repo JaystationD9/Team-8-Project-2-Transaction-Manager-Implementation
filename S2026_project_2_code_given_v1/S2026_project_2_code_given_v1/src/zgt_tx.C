@@ -300,6 +300,60 @@ void zgt_tx::print_lock(){
 void zgt_tx::perform_read_write_operation(long tid,long obno, char lockmode){
   
   // write your code
+    zgt_tx *txptr = get_tx(tid);
+  if (txptr == NULL) {
+    fprintf(ZGT_Sh->logfile,
+            "Trying to perform read/write for non-existent Tx:%ld\n", tid);
+    fflush(ZGT_Sh->logfile);
+    printf("Trying to perform read/write for non-existent Tx:%ld\n", tid);
+    fflush(stdout);
+    return;
+  }
+
+  // Clear any "waiting on object" info now that the op can proceed
+  txptr->status   = TR_ACTIVE;
+  txptr->obno     = -1;
+  txptr->lockmode = ' ';
+
+  // Accept either S/X or R/W to make the helper more tolerant
+  if (lockmode == 'S' || lockmode == 'R') {
+    ZGT_Sh->objarray[obno]->value -= 4;
+
+    fprintf(ZGT_Sh->logfile,
+            "T%ld\t\tReadTx\t\t%ld:%d:%d\tReadLock\tGranted\t\t%c\n",
+            tid,
+            obno,
+            ZGT_Sh->objarray[obno]->value,
+            ZGT_Sh->optime[tid],
+            txptr->status);
+    fflush(ZGT_Sh->logfile);
+
+    // optime values are small enough for microseconds, not seconds
+    usleep(ZGT_Sh->optime[tid]);
+  }
+  else if (lockmode == 'X' || lockmode == 'W') {
+    ZGT_Sh->objarray[obno]->value += 7;
+
+    fprintf(ZGT_Sh->logfile,
+            "T%ld\t\tWriteTx\t\t%ld:%d:%d\tWriteLock\tGranted\t\t%c\n",
+            tid,
+            obno,
+            ZGT_Sh->objarray[obno]->value,
+            ZGT_Sh->optime[tid],
+            txptr->status);
+    fflush(ZGT_Sh->logfile);
+
+    usleep(ZGT_Sh->optime[tid]);
+  }
+  else {
+    fprintf(ZGT_Sh->logfile,
+            "Invalid lock mode %c for Tx:%ld on obj:%ld\n",
+            lockmode, tid, obno);
+    fflush(ZGT_Sh->logfile);
+    printf("Invalid lock mode %c for Tx:%ld on obj:%ld\n",
+           lockmode, tid, obno);
+    fflush(stdout);
+  }
 
 }
 
