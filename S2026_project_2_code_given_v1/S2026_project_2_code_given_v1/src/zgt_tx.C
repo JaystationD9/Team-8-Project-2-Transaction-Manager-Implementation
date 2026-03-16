@@ -101,15 +101,28 @@ void *begintx(void *arg){
 
 void *readtx(void *arg){
   struct param *node = (struct param*)arg;// get tid and objno and count
+  
+  start_operation(node->tid, node->count);
 
-  // do the operations for reading. Write your code
+  process_read_write_operation(node->tid, node->obno, node->count, 'S');
+
+  finish_operation(node->tid);
+
+  pthread_exit(NULL);
+
 }
 
 
 void *writetx(void *arg){ //do the operations for writing; similar to readTx
   struct param *node = (struct param*)arg;	// struct parameter that contains
-  
-  // do the operations for writing; similar to readTx. Write your code
+
+  start_operation(node->tid, node->count);
+
+  process_read_write_operation(node->tid, node->obno, node->count, 'X');
+
+  finish_operation(node->tid);
+
+  pthread_exit(NULL);
 
 }
 
@@ -117,7 +130,24 @@ void *writetx(void *arg){ //do the operations for writing; similar to readTx
 
 void *process_read_write_operation(long tid, long obno,  int count, char mode){
 
-  
+
+  zgt_tx *tx = get_tx(tid);
+
+  if(tx == NULL)
+  {
+    printf("Transaction %ld not found\n", tid);
+    return NULL;
+  }
+
+  int result = tx->set_lock(tid, tx->sgno, obno, count, mode);
+
+  if(result == 0)
+  {
+    tx->perform_read_write_operation(tid, obno, mode);
+  }
+
+  return NULL;
+
 }
 
 void *aborttx(void *arg)
@@ -173,14 +203,46 @@ int zgt_tx::remove_tx ()
 
 /* this method sets lock on objno1 with lockmode1 for a tx*/
 
-int zgt_tx::set_lock(long tid1, long sgno1, long obno1, int count, char lockmode1){
-  //if the thread has to wait, block the thread on a semaphore from the
-  //sempool in the transaction manager. Set the appropriate parameters in the
-  //transaction list if waiting.
-  //if successful  return(0); else -1
-  
-    //write your code
-  
+int zgt_tx::set_lock(long tid1, long sgno1, long obno1, int count, char lockmode1)
+{
+    /* if this transaction already holds the lock */
+    if(ZGT_Ht->find(tid1, obno1) != NULL)
+        return 0;
+
+    /* scan hash table chain for this object */
+    zgt_hlink *temp = ZGT_Ht->find(0, obno1);
+
+    while(temp != NULL)
+    {
+        if(temp->obno == obno1 && temp->tid != tid1)
+        {
+            if(lockmode1 == 'X' || temp->lockmode == 'X')
+            {
+                printf("Tx %ld waiting for object %ld\n", tid1, obno1);
+
+                this->status = TR_WAIT;
+                this->obno = obno1;
+                this->lockmode = lockmode1;
+
+                return -1;
+            }
+        }
+
+        temp = temp->nextp;
+    }
+
+    /* grant lock */
+    ZGT_Ht->add(this, tid1, obno1, lockmode1);
+
+    this->obno = obno1;
+    this->lockmode = lockmode1;
+
+#ifdef TX_DEBUG
+    printf("Lock granted: Tx %ld on object %ld mode %c\n",
+           tid1, obno1, lockmode1);
+#endif
+
+    return 0;
 }
 
 int zgt_tx::free_locks()
@@ -390,6 +452,8 @@ void *start_operation(long tid, long count){
   while(ZGT_Sh->condset[tid] != count)		// wait if condset[t] is != count
     pthread_cond_wait(&ZGT_Sh->condpool[tid],&ZGT_Sh->mutexpool[tid]);
   
+  return NULL;
+  
 }
 
 // Otherside of teh start operation;
@@ -399,6 +463,7 @@ void *finish_operation(long tid){
   ZGT_Sh->condset[tid]--;	// decr condset[tid] for allowing the next op
   pthread_cond_broadcast(&ZGT_Sh->condpool[tid]);// other waiting threads of same tx
   pthread_mutex_unlock(&ZGT_Sh->mutexpool[tid]); 
+  return NULL;
 }
 
 
