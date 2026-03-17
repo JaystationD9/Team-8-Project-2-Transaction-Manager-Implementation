@@ -149,18 +149,50 @@ int zgt_tm::TxWrite(long tid, long obno, int thrNum)
  }
 
 int zgt_tm::CommitTx(long tid, int thrNum)
- {
-   
-    //write your code
-   return(0); //successful operation
+{
+#ifdef TM_DEBUG
+   printf("\ncreating CommitTx thread for Tx: %ld\n", tid);
+   fflush(stdout);
+#endif
 
- }
+   struct param *nodeinfo = (struct param*)malloc(sizeof(struct param));
+   nodeinfo->tid = tid;
+   nodeinfo->obno = -1;
+   nodeinfo->Txtype = ' ';
+   nodeinfo->count = --SEQNUM[tid];
+
+   int status;
+   status = pthread_create(&threadid[thrNum], NULL, committx, (void*)nodeinfo);
+   if (status){
+     printf("ERROR: return code from pthread_create() is:%d\n", status);
+     exit(-1);
+   }
+
+   return(0);  //sucessful operation
+}
  
 int zgt_tm::AbortTx(long tid, int thrNum)
- {       
-    //write your code
-   return(0);  //successful operation
- }
+{
+#ifdef TM_DEBUG
+   printf("\ncreating AbortTx thread for Tx: %ld\n", tid);
+   fflush(stdout);
+#endif
+
+   struct param *nodeinfo = (struct param*)malloc(sizeof(struct param));
+   nodeinfo->tid = tid;
+   nodeinfo->obno = -1;
+   nodeinfo->Txtype = ' ';
+   nodeinfo->count = --SEQNUM[tid];
+
+   int status;
+   status = pthread_create(&threadid[thrNum], NULL, aborttx, (void*)nodeinfo);
+   if (status){
+     printf("ERROR: return code from pthread_create() is:%d\n", status);
+     exit(-1);
+   }
+
+   return(0);   //successful operation
+}
 
 int zgt_tm::endTm(int thrNum){
     int rc=0;
