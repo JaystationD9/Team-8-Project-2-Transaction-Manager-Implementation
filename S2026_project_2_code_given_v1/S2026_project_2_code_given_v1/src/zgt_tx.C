@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/signal.h>
+#include <sys/sem.h>
 #include "zgt_def.h"
 #include "zgt_tm.h"
 #include "zgt_extern.h"
@@ -130,20 +131,19 @@ void *writetx(void *arg){ //do the operations for writing; similar to readTx
 
 void *process_read_write_operation(long tid, long obno,  int count, char mode){
 
-
   zgt_tx *tx = get_tx(tid);
 
   if(tx == NULL)
   {
     printf("Transaction %ld not found\n", tid);
+    fflush(stdout);
     return NULL;
   }
 
-  int result = tx->set_lock(tid, tx->sgno, obno, count, mode);
-
-  if(result == 0)
+  if (tx->set_lock(tid, tx->sgno, obno, count, mode) == 0)
   {
-    tx->perform_read_write_operation(tid, obno, mode);
+    if (tx->status != TR_ABORT)
+      tx->perform_read_write_operation(tid, obno, mode);
   }
 
   return NULL;
@@ -152,7 +152,7 @@ void *process_read_write_operation(long tid, long obno,  int count, char mode){
 
 void *aborttx(void *arg)
 {
-  struct param *node = (struct param*)arg;   // tid and count
+  struct param *node = (struct param*)arg;// get tid and count  
 
   start_operation(node->tid, node->count);
 
@@ -160,12 +160,14 @@ void *aborttx(void *arg)
 
   finish_operation(node->tid);
 
-  pthread_exit(NULL);    //thread exist
+  pthread_exit(NULL);			// thread exit
 }
 
 void *committx(void *arg)
 {
-  struct param *node = (struct param*)arg;   // tid and count
+ 
+    //remove the locks/objects before committing
+  struct param *node = (struct param*)arg;// get tid and count
 
   start_operation(node->tid, node->count);
 
@@ -173,7 +175,7 @@ void *committx(void *arg)
 
   finish_operation(node->tid);
 
-  pthread_exit(NULL);  //thread exit
+  pthread_exit(NULL);			// thread exit
 }
 
 //suggestion as they are very similar
@@ -182,16 +184,16 @@ void *committx(void *arg)
 // operation. Make sure you give error messages if you are trying to
 // commit/abort a non-existent tx
 
-void *do_commit_abort_operation(long t, char status)
-{
+void *do_commit_abort_operation(long t, char status){
+
   zgt_tx *txptr;
+  int nwait, i;
 
   zgt_p(0);   // lock tm
 
   txptr = get_tx(t);
 
-  if (txptr == NULL)
-  {
+  if (txptr == NULL){
     fprintf(ZGT_Sh->logfile, "Trying to %s a Tx:%ld that does not exist\n",
             (status == TR_ABORT ? "Abort" : "Commit"), t);
     fflush(ZGT_Sh->logfile);
@@ -211,13 +213,15 @@ void *do_commit_abort_operation(long t, char status)
 
   fflush(ZGT_Sh->logfile);
 
-  txptr->free_locks();   // release all objects of tx
+  txptr->free_locks();
 
-  if (txptr->semno != -1){
-    zgt_v(txptr->semno);   // wake up waiting tx
-    txptr->semno = -1;
-  }
+  nwait = semctl(ZGT_Semid, (int)t, GETNCNT, 0);
+  if (nwait < 0) nwait = 0;
 
+  for (i = 0; i < nwait; i++)
+    zgt_v((int)t);
+
+  txptr->semno = -1;
   txptr->remove_tx();
 
   zgt_v(0);   // unlock tm
@@ -229,15 +233,16 @@ int zgt_tx::remove_tx ()
 {
   //remove the transaction from the TM
   
-  zgt_tx *txptr, *lastr1;
-  lastr1 = ZGT_Sh->lastr;
+  zgt_tx *txptr, *prev;
+  prev = NULL;
+
   for(txptr = ZGT_Sh->lastr; txptr != NULL; txptr = txptr->nextr){	// scan through list
-	  if (txptr->tid == this->tid){		// if correct node is found          
-		 lastr1->nextr = txptr->nextr;	// update nextr value; done
-		 //delete this;
+	  if (txptr->tid == this->tid){		// if correct node is found
+         if (prev == NULL) ZGT_Sh->lastr = txptr->nextr;
+         else prev->nextr = txptr->nextr;
          return(0);
 	  }
-	  else lastr1 = txptr->nextr;			// else update prev value
+	  prev = txptr;
    }
   fprintf(ZGT_Sh->logfile, "Trying to Remove a Tx:%d that does not exist\n", this->tid);
   fflush(ZGT_Sh->logfile);
@@ -250,44 +255,79 @@ int zgt_tx::remove_tx ()
 
 int zgt_tx::set_lock(long tid1, long sgno1, long obno1, int count, char lockmode1)
 {
+    zgt_hlink *temp;
+    long holder;
+
     /* if this transaction already holds the lock */
     if(ZGT_Ht->find(tid1, obno1) != NULL)
         return 0;
 
-    /* scan hash table chain for this object */
-    zgt_hlink *temp = ZGT_Ht->find(0, obno1);
-
-    while(temp != NULL)
+    while(1)
     {
-        if(temp->obno == obno1 && temp->tid != tid1)
-        {
-            if(lockmode1 == 'X' || temp->lockmode == 'X')
-            {
-                printf("Tx %ld waiting for object %ld\n", tid1, obno1);
+        zgt_p(0);
 
-                this->status = TR_WAIT;
-                this->obno = obno1;
-                this->lockmode = lockmode1;
-
-                return -1;
-            }
+        /* check again after getting semaphore */
+        if(ZGT_Ht->find(tid1, obno1) != NULL){
+            zgt_v(0);
+            return 0;
         }
 
-        temp = temp->nextp;
-    }
+        holder = -1;
 
-    /* grant lock */
-    ZGT_Ht->add(this, tid1, obno1, lockmode1);
+        /* scan hash table chain for this object */
+        temp = ZGT_Ht->find(0, obno1);
 
-    this->obno = obno1;
-    this->lockmode = lockmode1;
+        while(temp != NULL)
+        {
+            if(temp->obno == obno1 && temp->tid != tid1)
+            {
+                if(lockmode1 == 'X' || temp->lockmode == 'X')
+                {
+                    holder = temp->tid;
+                    break;
+                }
+            }
+
+            temp = temp->next;
+        }
+
+        if(holder == -1)
+        {
+            /* grant lock */
+            ZGT_Ht->add(this, tid1, obno1, lockmode1);
+
+            this->status = TR_ACTIVE;
+            this->obno = -1;
+            this->lockmode = ' ';
+            this->semno = -1;
 
 #ifdef TX_DEBUG
-    printf("Lock granted: Tx %ld on object %ld mode %c\n",
-           tid1, obno1, lockmode1);
+            printf("Lock granted: Tx %ld on object %ld mode %c\n",
+                   tid1, obno1, lockmode1);
+            fflush(stdout);
 #endif
+            zgt_v(0);
+            return 0;
+        }
 
-    return 0;
+        printf("Tx %ld waiting for object %ld\n", tid1, obno1);
+        fflush(stdout);
+
+        this->status = TR_WAIT;
+        this->obno = obno1;
+        this->lockmode = lockmode1;
+
+        setTx_semno(holder, (int)holder);
+
+        zgt_v(0);
+
+        zgt_p((int)holder);
+
+        if(this->status == TR_ABORT)
+            return -1;
+    }
+
+    return -1;
 }
 
 int zgt_tx::free_locks()
@@ -298,8 +338,11 @@ int zgt_tx::free_locks()
   // and release all Tx's waiting on this Tx
 
   zgt_hlink* temp = head;  //first obj of tx
+  zgt_hlink* nextp1;
   
-  for(temp;temp != NULL;temp = temp->nextp){	// SCAN Tx obj list
+  for(temp;temp != NULL;temp = nextp1){	// SCAN Tx obj list
+
+      nextp1 = temp->nextp;
 
       fprintf(ZGT_Sh->logfile, "%d : %d, ", temp->obno, ZGT_Sh->objarray[temp->obno]->value);
       fflush(ZGT_Sh->logfile);
@@ -316,6 +359,8 @@ int zgt_tx::free_locks()
 #endif
       }
     }
+
+  head = NULL;
   fprintf(ZGT_Sh->logfile, "\n");
   fflush(ZGT_Sh->logfile);
   
@@ -353,6 +398,7 @@ int zgt_tx::end_tx()
     while (prevp->nextr != linktx) prevp = prevp->nextr;
     prevp->nextr = linktx->nextr;    
   }
+  return(0);
 }
 
 // currently not used
@@ -407,7 +453,7 @@ void zgt_tx::print_lock(){
 void zgt_tx::perform_read_write_operation(long tid,long obno, char lockmode){
   
   // write your code
-    zgt_tx *txptr = get_tx(tid);
+  zgt_tx *txptr = get_tx(tid);
   if (txptr == NULL) {
     fprintf(ZGT_Sh->logfile,
             "Trying to perform read/write for non-existent Tx:%ld\n", tid);
@@ -510,5 +556,3 @@ void *finish_operation(long tid){
   pthread_mutex_unlock(&ZGT_Sh->mutexpool[tid]); 
   return NULL;
 }
-
-
