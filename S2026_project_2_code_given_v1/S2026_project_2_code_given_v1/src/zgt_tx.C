@@ -152,21 +152,28 @@ void *process_read_write_operation(long tid, long obno,  int count, char mode){
 
 void *aborttx(void *arg)
 {
-  struct param *node = (struct param*)arg;// get tid and count  
+  struct param *node = (struct param*)arg;   // tid and count
 
-  //write your code
+  start_operation(node->tid, node->count);
 
-  pthread_exit(NULL);			// thread exit
+  do_commit_abort_operation(node->tid, TR_ABORT);
+
+  finish_operation(node->tid);
+
+  pthread_exit(NULL);    //thread exist
 }
 
 void *committx(void *arg)
 {
- 
-    //remove the locks/objects before committing
-  struct param *node = (struct param*)arg;// get tid and count
+  struct param *node = (struct param*)arg;   // tid and count
 
-  //write your code
-  pthread_exit(NULL);			// thread exit
+  start_operation(node->tid, node->count);
+
+  do_commit_abort_operation(node->tid, TR_END);
+
+  finish_operation(node->tid);
+
+  pthread_exit(NULL);  //thread exit
 }
 
 //suggestion as they are very similar
@@ -175,9 +182,47 @@ void *committx(void *arg)
 // operation. Make sure you give error messages if you are trying to
 // commit/abort a non-existent tx
 
-void *do_commit_abort_operation(long t, char status){
+void *do_commit_abort_operation(long t, char status)
+{
+  zgt_tx *txptr;
 
-  // write your code
+  zgt_p(0);   // lock tm
+
+  txptr = get_tx(t);
+
+  if (txptr == NULL)
+  {
+    fprintf(ZGT_Sh->logfile, "Trying to %s a Tx:%ld that does not exist\n",
+            (status == TR_ABORT ? "Abort" : "Commit"), t);
+    fflush(ZGT_Sh->logfile);
+    printf("Trying to %s a Tx:%ld that does not exist\n",
+           (status == TR_ABORT ? "Abort" : "Commit"), t);
+    fflush(stdout);
+    zgt_v(0);
+    return NULL;
+  }
+
+  txptr->status = status;
+
+  if (status == TR_ABORT)
+    fprintf(ZGT_Sh->logfile, "T%ld\t\tAbortTx\t\t", t);
+  else
+    fprintf(ZGT_Sh->logfile, "T%ld\t\tCommitTx\t", t);
+
+  fflush(ZGT_Sh->logfile);
+
+  txptr->free_locks();   // release all objects of tx
+
+  if (txptr->semno != -1){
+    zgt_v(txptr->semno);   // wake up waiting tx
+    txptr->semno = -1;
+  }
+
+  txptr->remove_tx();
+
+  zgt_v(0);   // unlock tm
+
+  return NULL;
 }
 
 int zgt_tx::remove_tx ()
