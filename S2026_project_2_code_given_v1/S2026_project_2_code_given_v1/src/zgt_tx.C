@@ -340,32 +340,24 @@ int zgt_tx::free_locks()
   zgt_hlink* temp = head;  //first obj of tx
   zgt_hlink* nextp1;
   
-  for(temp;temp != NULL;temp = nextp1){	// SCAN Tx obj list
-
+  for(temp = head; temp != NULL; temp = nextp1){
       nextp1 = temp->nextp;
 
-      fprintf(ZGT_Sh->logfile, "%d : %d, ", temp->obno, ZGT_Sh->objarray[temp->obno]->value);
+      fprintf(ZGT_Sh->logfile, "%ld : %d, ", temp->obno, ZGT_Sh->objarray[temp->obno]->value);
       fflush(ZGT_Sh->logfile);
-      
-      if (ZGT_Ht->remove(this,1,(long)temp->obno) == 1){
-	   printf(":::ERROR:node with tid:%d and onjno:%d was not found for deleting", this->tid, temp->obno);		// Release from hash table
-	   fflush(stdout);
-      }
-      else {
-#ifdef TX_DEBUG
-	   printf("\n:::Hash node with Tid:%d, obno:%d lockmode:%c removed\n",
-                            temp->tid, temp->obno, temp->lockmode);
-	   fflush(stdout);
-#endif
-      }
-    }
 
+      this->head = temp;   // force remove to take the fast path
+      if (ZGT_Ht->remove(this, temp->sgno, (long)temp->obno) == 1){
+          printf(":::ERROR:node with tid:%ld and obno:%ld was not found for deleting", this->tid, temp->obno);
+          fflush(stdout);
+      }
+  }
   head = NULL;
-  fprintf(ZGT_Sh->logfile, "\n");
-  fflush(ZGT_Sh->logfile);
-  
-  return(0);
-}		
+    fprintf(ZGT_Sh->logfile, "\n");
+    fflush(ZGT_Sh->logfile);
+    
+    return(0);
+  }		
 
 // CURRENTLY Not USED
 // USED to COMMIT
