@@ -70,27 +70,17 @@ zgt_tx* get_tx(long tid1){
 /* adds it to transaction list */
 
 void *begintx(void *arg){
-  //intialise a transaction object. Make sure it is 
-  //done after acquiring the semaphore for the tm and making sure that 
-  //the operation can proceed using the condition variable. When creating
-  //the tx object, set the tx to TR_ACTIVE and obno to -1; there is no 
-  //semno as yet as none is waiting on this tx.
-  
-  struct param *node = (struct param*)arg;// get tid and count
-  start_operation(node->tid, node->count); 
-    zgt_tx *tx = new zgt_tx(node->tid,TR_ACTIVE, node->Txtype, pthread_self());	// Create new tx node
- 
-    // Writes the Txtype to the file.
-  
-    zgt_p(0);				// Lock Tx manager; Add node to transaction list
-  
-    tx->nextr = ZGT_Sh->lastr;
-    ZGT_Sh->lastr = tx;   
-    zgt_v(0); 			// Release tx manager 
-  fprintf(ZGT_Sh->logfile, "T%d\t%c \tBeginTx\n", node->tid, node->Txtype);	// Write log record and close
-    fflush(ZGT_Sh->logfile);
-  finish_operation(node->tid);
-  pthread_exit(NULL);				// thread exit
+  struct param *node = (struct param*)arg;                 // get the param struct passed into this thread
+  start_operation(node->tid, node->count);                 // wait until this begin operation is allowed to run for this transaction
+  zgt_tx *tx = new zgt_tx(node->tid,TR_ACTIVE, node->Txtype, pthread_self()); // create a new transaction object in ACTIVE state
+  zgt_p(0);                                                // lock the transaction manager before changing shared tx list
+  tx->nextr = ZGT_Sh->lastr;                               // point new transaction to current head of transaction list
+  ZGT_Sh->lastr = tx;                                      // insert new transaction at front of transaction list
+  zgt_v(0);                                                // unlock the transaction manager
+  fprintf(ZGT_Sh->logfile, "T%d\t%c \tBeginTx\n", node->tid, node->Txtype); // write BeginTx record to log
+  fflush(ZGT_Sh->logfile);                                 // force log output immediately
+  finish_operation(node->tid);                             // signal that the next operation of this transaction may proceed
+  pthread_exit(NULL);                                      // end this thread
 }
 
 /* Method to handle Readtx action in test file    */
@@ -101,30 +91,20 @@ void *begintx(void *arg){
 /* until the lock is released */
 
 void *readtx(void *arg){
-  struct param *node = (struct param*)arg;// get tid and objno and count
-  
-  start_operation(node->tid, node->count);
-
-  process_read_write_operation(node->tid, node->obno, node->count, 'S');
-
-  finish_operation(node->tid);
-
-  pthread_exit(NULL);
-
+  struct param *node = (struct param*)arg;                 // get the param struct passed into this thread
+  start_operation(node->tid, node->count);                 // wait until this read is allowed to run in transaction order
+  process_read_write_operation(node->tid, node->obno, node->count, 'S'); // perform common read/write logic using shared lock mode
+  finish_operation(node->tid);                             // signal that the next operation of this transaction may proceed
+  pthread_exit(NULL);                                      // end this thread
 }
 
 
-void *writetx(void *arg){ //do the operations for writing; similar to readTx
-  struct param *node = (struct param*)arg;	// struct parameter that contains
-
-  start_operation(node->tid, node->count);
-
-  process_read_write_operation(node->tid, node->obno, node->count, 'X');
-
-  finish_operation(node->tid);
-
-  pthread_exit(NULL);
-
+void *writetx(void *arg){
+  struct param *node = (struct param*)arg;                 // get the param struct passed into this thread
+  start_operation(node->tid, node->count);                 // wait until this write is allowed to run in transaction order
+  process_read_write_operation(node->tid, node->obno, node->count, 'X'); // perform common read/write logic using exclusive lock mode
+  finish_operation(node->tid);                             // signal that the next operation of this transaction may proceed
+  pthread_exit(NULL);                                      // end this thread
 }
 
 // common method to process read/write: Just a suggestion
@@ -152,30 +132,20 @@ void *process_read_write_operation(long tid, long obno,  int count, char mode){
 
 void *aborttx(void *arg)
 {
-  struct param *node = (struct param*)arg;// get tid and count  
-
-  start_operation(node->tid, node->count);
-
-  do_commit_abort_operation(node->tid, TR_ABORT);
-
-  finish_operation(node->tid);
-
-  pthread_exit(NULL);			// thread exit
+  struct param *node = (struct param*)arg;                 // get the param struct passed into this thread
+  start_operation(node->tid, node->count);                 // wait until this abort is allowed to run in transaction order
+  do_commit_abort_operation(node->tid, TR_ABORT);          // perform shared commit/abort cleanup logic as an abort
+  finish_operation(node->tid);                             // signal that the next operation of this transaction may proceed
+  pthread_exit(NULL);                                      // end this thread
 }
 
 void *committx(void *arg)
 {
- 
-    //remove the locks/objects before committing
-  struct param *node = (struct param*)arg;// get tid and count
-
-  start_operation(node->tid, node->count);
-
-  do_commit_abort_operation(node->tid, TR_END);
-
-  finish_operation(node->tid);
-
-  pthread_exit(NULL);			// thread exit
+  struct param *node = (struct param*)arg;                 // get the param struct passed into this thread
+  start_operation(node->tid, node->count);                 // wait until this commit is allowed to run in transaction order
+  do_commit_abort_operation(node->tid, TR_END);            // perform shared commit/abort cleanup logic as a commit/end
+  finish_operation(node->tid);                             // signal that the next operation of this transaction may proceed
+  pthread_exit(NULL);                                      // end this thread
 }
 
 //suggestion as they are very similar
@@ -332,32 +302,27 @@ int zgt_tx::set_lock(long tid1, long sgno1, long obno1, int count, char lockmode
 
 int zgt_tx::free_locks()
 {
+  zgt_hlink* temp = head;                                  // start with the first lock held by this transaction
+  zgt_hlink* nextp1;                                       // used to save the next lock before removing the current one
   
-  // this part frees all locks owned by the transaction
-  // that is, remove the objects from the hash table
-  // and release all Tx's waiting on this Tx
+  for(temp = head; temp != NULL; temp = nextp1){          // walk through every lock owned by this transaction
+      nextp1 = temp->nextp;                               // save pointer to next lock before current one is removed
 
-  zgt_hlink* temp = head;  //first obj of tx
-  zgt_hlink* nextp1;
-  
-  for(temp = head; temp != NULL; temp = nextp1){
-      nextp1 = temp->nextp;
+      fprintf(ZGT_Sh->logfile, "%ld : %d, ", temp->obno, ZGT_Sh->objarray[temp->obno]->value); // log the object and its value
+      fflush(ZGT_Sh->logfile);                            // force the log output immediately
 
-      fprintf(ZGT_Sh->logfile, "%ld : %d, ", temp->obno, ZGT_Sh->objarray[temp->obno]->value);
-      fflush(ZGT_Sh->logfile);
-
-      this->head = temp;   // force remove to take the fast path
-      if (ZGT_Ht->remove(this, temp->sgno, (long)temp->obno) == 1){
-          printf(":::ERROR:node with tid:%ld and obno:%ld was not found for deleting", this->tid, temp->obno);
-          fflush(stdout);
+      this->head = temp;                                  // move head to current lock so remove() can use it directly
+      if (ZGT_Ht->remove(this, temp->sgno, (long)temp->obno) == 1){ // remove this lock from the lock table
+          printf(":::ERROR:node with tid:%ld and obno:%ld was not found for deleting", this->tid, temp->obno); // print error if remove fails
+          fflush(stdout);                                 // force error output immediately
       }
   }
-  head = NULL;
-    fprintf(ZGT_Sh->logfile, "\n");
-    fflush(ZGT_Sh->logfile);
+  head = NULL;                                            // transaction now holds no locks
+  fprintf(ZGT_Sh->logfile, "\n");                         // finish the commit/abort log line
+  fflush(ZGT_Sh->logfile);                                // force the log output immediately
     
-    return(0);
-  }		
+  return(0);                                              // return success
+}		
 
 // CURRENTLY Not USED
 // USED to COMMIT
